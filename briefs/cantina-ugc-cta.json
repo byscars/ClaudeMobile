@@ -1,0 +1,10 @@
+{
+  "product": "Cantina AI (AI UGC with CTA campaign — affiliatenetwork.com)",
+  "audience": "Content creators and everyday users 20–38 who are curious about AI tools but haven't tried making AI video yet",
+  "job": "30s UGC-style ad — creator shows themselves using Cantina's AI, reacts to output, delivers a CTA. Casual phone-shot, talking to camera. TikTok/Reels/Shorts.",
+  "formula": "product-review",
+  "variants": 3,
+  "voiceRef": "Genuinely surprised and slightly giddy — not salesy. Sounds like you're showing someone a cool app you found, not running an ad.",
+  "constraints": "No price mentions. No hype language. Must include a CTA in the final 5 seconds directing viewers to try Cantina. Under 120 words. Include one small honest observation (not everything is perfect) to build trust.",
+  "successCriteria": "Feels like an organic creator discovery video, not an ad. Includes one specific detail about what the AI made or did. CTA feels like a recommendation not a sell."
+}
