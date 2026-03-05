@@ -1,0 +1,158 @@
+{
+  "name": "ClaudeMobile — UGC Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ugc-pipeline",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook — Receive Brief",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [180, 300],
+      "webhookId": "ugc-pipeline"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and structure the incoming brief\nconst body = $input.first().json.body ?? $input.first().json;\n\nconst required = ['product', 'audience'];\nfor (const field of required) {\n  if (!body[field]) throw new Error(`Missing required field: ${field}`);\n}\n\nconst FORMULA_GUIDES = {\n  'testimonial': 'Open with \"I was skeptical but…\". Personal story arc. Specific before/after detail. Casual language, imperfect grammar ok.',\n  'problem-solution': 'Lead with the pain point in first sentence. Agitate it briefly. Introduce product as the fix. Show result.',\n  'product-review': 'Unboxing feel. What you liked. One small honest complaint (builds trust). Net positive verdict.',\n  'grwm': 'Routine-style narration. Product woven into daily habit. Conversational, slice-of-life tone.',\n  'comparison': 'Was using X before. Tried this. Here\\'s the difference. Specific contrast points.',\n};\n\nconst formula = body.formula ?? 'testimonial';\nif (!FORMULA_GUIDES[formula]) throw new Error(`Invalid formula: ${formula}. Use: ${Object.keys(FORMULA_GUIDES).join(', ')}`);\n\nreturn [{\n  json: {\n    brief: {\n      product: body.product,\n      audience: body.audience,\n      job: body.job ?? `30s UGC ad script for ${body.product}`,\n      formula,\n      variants: Math.min(Math.max(parseInt(body.variants ?? '3'), 1), 5),\n      voiceRef: body.voiceRef ?? null,\n      constraints: body.constraints ?? null,\n      successCriteria: body.successCriteria ?? null,\n    },\n    formulaGuide: FORMULA_GUIDES[formula],\n  }\n}];"
+      },
+      "id": "validate-brief",
+      "name": "Validate Brief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 2048,\n  \"system\": \"You are an expert UGC scriptwriter specializing in high-converting short-form ads.\\n\\nRULES:\\n- Sound human. Imperfect grammar is fine. No corporate language.\\n- Be specific. Use numbers, sensory details, lived-in moments.\\n- Emotional hook in the first 3 seconds.\\n- No hype emojis (🔥🚀💯). They signal \\\"ad\\\" immediately.\\n- Conversational — like texting a friend about something that actually worked.\\n- Each script should feel distinct.\\n\\nCONSTRAINTS:\\n- Target 75–120 words (30–45s read aloud)\\n- Use [pause] for natural pauses\\n- Visual direction in (parentheses)\\n- End with a soft CTA\\n\\nOUTPUT: Return ONLY the scripts, numbered, no preamble.\",\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": \"## Brief\\n\\nProduct: {{ $json.brief.product }}\\nAudience: {{ $json.brief.audience }}\\nJob: {{ $json.brief.job }}\\nFormula: {{ $json.brief.formula }} — {{ $json.formulaGuide }}\\n{{ $json.brief.voiceRef ? 'Voice/tone: ' + $json.brief.voiceRef : '' }}\\n{{ $json.brief.constraints ? 'Constraints: ' + $json.brief.constraints : '' }}\\n{{ $json.brief.successCriteria ? 'Success criteria: ' + $json.brief.successCriteria : '' }}\\n\\nWrite {{ $json.brief.variants }} distinct UGC scripts using the {{ $json.brief.formula }} formula. Each should feel like it comes from a different real person.\"\n  }]\n}",
+        "options": {}
+      },
+      "id": "generate-scripts",
+      "name": "Generate Scripts (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropic-api-key",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude's response into individual scripts and score them\nconst response = $input.first().json;\nconst rawText = response.content[0].text;\nconst brief = $('Validate Brief').first().json.brief;\n\n// Split on numbered markers\nlet scripts = rawText\n  .split(/\\n(?=(?:Script\\s*)?\\d+[.):]\\s)/i)\n  .map(s => s.trim())\n  .filter(s => s.length > 20);\n\nif (scripts.length < brief.variants) {\n  // Fallback: double newline split\n  const fallback = rawText.split(/\\n{2,}/).filter(s => s.trim().length > 50);\n  if (fallback.length > scripts.length) scripts = fallback;\n}\n\n// Quality scoring\nconst HYPE_PATTERNS = [\n  /[🔥🚀💯⚡✨🎯💪]/g,\n  /game.?changer/i, /revolutionary/i, /transform your life/i,\n  /\\bOMG\\b/i, /\\bAMAZING\\b/i, /limited time offer/i, /act now/i,\n];\nconst CORPORATE_PATTERNS = [\n  /leverage/i, /utilize/i, /synergy/i, /cutting.?edge/i,\n  /best.?in.?class/i, /industry.?leading/i, /empower/i,\n];\nconst SPECIFIC_INDICATORS = [\n  /\\d+\\s*(days?|weeks?|months?|lbs?|pounds?|percent|%|hours?|minutes?)/i,\n  /\\$\\d+/, /before and after/i, /used to|used it for/i,\n];\n\nfunction score(script) {\n  const wordCount = script.split(/\\s+/).filter(Boolean).length;\n  const checks = [\n    wordCount >= 60 && wordCount <= 150,\n    !HYPE_PATTERNS.some(p => p.test(script)),\n    !CORPORATE_PATTERNS.some(p => p.test(script)),\n    SPECIFIC_INDICATORS.some(p => p.test(script)),\n    (script.split(/[.!?\\n]/)[0] ?? '').split(/\\s+/).filter(Boolean).length <= 18,\n    /\\b(i'm|i've|i'd|can't|don't|it's|that's|you're|didn't|wouldn't)\\b/i.test(script),\n  ];\n  const passed = checks.filter(Boolean).length;\n  return { score: Math.round((passed / checks.length) * 100), passed: passed >= 4 };\n}\n\nconst scored = scripts.map((script, i) => ({\n  index: i + 1,\n  script,\n  quality: score(script),\n}));\n\n// Pick the highest scorer\nconst winner = scored.reduce((best, s) =>\n  s.quality.score > best.quality.score ? s : best\n, scored[0]);\n\nreturn [{\n  json: {\n    brief: $('Validate Brief').first().json.brief,\n    allScripts: scored,\n    winner,\n  }\n}];"
+      },
+      "id": "score-scripts",
+      "name": "Score & Pick Winner",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 1500,\n  \"messages\": [{\n    \"role\": \"user\",\n    \"content\": \"You are a creative director converting a UGC ad script into production assets.\\n\\nScript:\\n---\\n{{ $json.winner.script }}\\n---\\n\\nProduct: {{ $json.brief.product }}\\nAudience: {{ $json.brief.audience }}\\n\\nGenerate all four assets using these EXACT headers:\\n\\n## IMAGE PROMPT (Nano Banana / Flux)\\n[Character + scene. Subject, outfit, setting, lighting, mood, camera angle. Photorealistic, not stock-photo perfect.]\\n\\n## VIDEO PROMPT (VEO / Kling)\\n[Director-style only. Shot type, camera movement, lighting, pacing. No story narrative. Max 3 sentences.]\\n\\n## VOICE SCRIPT (ElevenLabs)\\n[Script formatted for TTS. Commas for short pauses, line breaks for longer, em dashes for breath. Remove visual stage directions.]\\n\\n## ELEVENLABS NOTES\\n[Voice style: pace (slow/medium/fast), tone, any section-specific adjustments.]\"\n  }]\n}",
+        "options": {}
+      },
+      "id": "generate-assets",
+      "name": "Generate Pipeline Assets (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "anthropic-api-key",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Claude's pipeline asset response into named fields\nconst response = $input.first().json;\nconst rawText = response.content[0].text;\nconst { brief, allScripts, winner } = $('Score & Pick Winner').first().json;\n\nfunction extract(header, nextHeader) {\n  const start = rawText.indexOf(`## ${header}`);\n  if (start === -1) return '';\n  const contentStart = rawText.indexOf('\\n', start) + 1;\n  const end = nextHeader ? rawText.indexOf(`## ${nextHeader}`) : rawText.length;\n  return rawText.slice(contentStart, end === -1 ? rawText.length : end).trim();\n}\n\nconst assets = {\n  imagePrompt: extract('IMAGE PROMPT (Nano Banana / Flux)', 'VIDEO PROMPT'),\n  videoPrompt: extract('VIDEO PROMPT (VEO / Kling)', 'VOICE SCRIPT'),\n  voiceScript: extract('VOICE SCRIPT (ElevenLabs)', 'ELEVENLABS NOTES'),\n  elevenLabsNotes: extract('ELEVENLABS NOTES'),\n};\n\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);\nconst slug = brief.product.toLowerCase().replace(/[^a-z0-9\\s-]/g, '').replace(/\\s+/g, '-').slice(0, 40);\n\nreturn [{\n  json: {\n    meta: {\n      timestamp,\n      product: brief.product,\n      formula: brief.formula,\n      folderName: `${timestamp}-${slug}`,\n    },\n    brief,\n    selectedScript: {\n      text: winner.script,\n      score: winner.quality.score,\n      passed: winner.quality.passed,\n      variantNumber: winner.index,\n    },\n    allScripts,\n    assets,\n  }\n}];"
+      },
+      "id": "parse-assets",
+      "name": "Parse Pipeline Assets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type", "value": "application/json" }
+            ]
+          }
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond — Return Pipeline",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1620, 300]
+    }
+  ],
+  "connections": {
+    "Webhook — Receive Brief": {
+      "main": [[{ "node": "Validate Brief", "type": "main", "index": 0 }]]
+    },
+    "Validate Brief": {
+      "main": [[{ "node": "Generate Scripts (Claude)", "type": "main", "index": 0 }]]
+    },
+    "Generate Scripts (Claude)": {
+      "main": [[{ "node": "Score & Pick Winner", "type": "main", "index": 0 }]]
+    },
+    "Score & Pick Winner": {
+      "main": [[{ "node": "Generate Pipeline Assets (Claude)", "type": "main", "index": 0 }]]
+    },
+    "Generate Pipeline Assets (Claude)": {
+      "main": [[{ "node": "Parse Pipeline Assets", "type": "main", "index": 0 }]]
+    },
+    "Parse Pipeline Assets": {
+      "main": [[{ "node": "Respond — Return Pipeline", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateId": "claudemobile-ugc-pipeline",
+    "instanceId": "claudemobile"
+  },
+  "id": "claudemobile-ugc-pipeline",
+  "tags": [{ "name": "ugc" }, { "name": "ai" }, { "name": "content-production" }]
+}
